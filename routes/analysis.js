@@ -31,15 +31,16 @@ router.get('/emotions', auth, async (req, res) => {
 
         const Conversation = require('../models/Conversation');
 
-        // Filter by Mode
+        // Filter by Mode/Model
         const modeMap = {
-            'mental_health': 'Mental Health',
-            'study': 'Study',
-            'funny': 'Funny',
-            'searching': 'Search'
+            'Mental Health': 'Mental Health',
+            'Chat': 'Chat',
+            'Funny': 'Funny',
+            'Study': 'Study'
         };
 
-        const modeQuery = req.query.mode ? { mode: modeMap[req.query.mode] || req.query.mode } : {};
+        const modelParam = req.query.model || 'Mental Health'; // Default to Mental Health
+        const modeQuery = { mode: modeMap[modelParam] || modelParam };
 
         const conversations = await Conversation.find({
             participants: userId,

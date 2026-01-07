@@ -7,6 +7,8 @@ const app = express();
 
 // Middleware
 app.use(cors());
+// Webhook requires raw body, so we must mount it before express.json()
+app.use('/payments/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // MongoDB Connection
@@ -32,23 +34,31 @@ app.use('/chat', require('./routes/chat'));
 app.use('/avatars', require('./routes/avatar'));
 app.use('/reminders', require('./routes/reminder'));
 app.use('/doctors', require('./routes/doctor'));
-app.use('/appointments', require('./routes/appointment'));
+// app.use('/appointments', require('./routes/appointment')); // Removed duplicate/old route
+app.use('/bookings', require('./routes/booking'));
+app.use('/payments', require('./routes/payment'));
+app.use('/chatbot', require('./routes/doctorChatbot'));
+app.use('/appointments', require('./routes/appointments'));
 app.use('/rpm', require('./routes/rpm'));
 app.use('/analysis', require('./routes/analysis'));
 app.use('/voice', require('./routes/voice'));
 app.use('/settings', require('./routes/settings'));
 app.use('/support', require('./routes/support'));
 app.use('/consent', require('./routes/consent'));
+app.use('/notifications', require('./routes/notification'));
 
 // Reminder Scheduler
 const cron = require('node-cron');
 const Reminder = require('./models/Reminder');
+const Notification = require('./models/Notification');
 const Chat = require('./models/Chat');
 const Conversation = require('./models/Conversation');
 
 cron.schedule('* * * * *', async () => {
     try {
         const now = new Date();
+
+        // --- GENERIC REMINDERS ---
         const dueReminders = await Reminder.find({
             time: { $lte: now },
             isTriggered: false
@@ -86,8 +96,22 @@ cron.schedule('* * * * *', async () => {
 
             console.log(`Triggered reminder for user ${reminder.userId}: ${reminder.message}`);
         }
+
+        // --- APPOINTMENT NOTIFICATIONS ---
+        const dueNotifications = await Notification.find({
+            scheduledTime: { $lte: now },
+            sentStatus: 'pending'
+        });
+
+        for (const notif of dueNotifications) {
+            notif.sentStatus = 'sent';
+            await notif.save();
+            console.log(`Marked appointment notification as sent for user ${notif.userId}: ${notif.reminderType}`);
+            // In a real app with FCM, we would send the push notification here.
+        }
+
     } catch (err) {
-        console.error('Error in reminder scheduler:', err);
+        console.error('Error in scheduler:', err);
     }
 });
 
