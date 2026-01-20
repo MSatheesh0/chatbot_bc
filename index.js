@@ -10,6 +10,7 @@ app.use(cors());
 // Webhook requires raw body, so we must mount it before express.json()
 app.use('/payments/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
+app.use(express.static('public'));
 
 // MongoDB Connection
 // MongoDB Connection
