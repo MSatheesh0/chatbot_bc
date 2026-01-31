@@ -59,4 +59,62 @@ router.get('/', auth, async (req, res) => {
     }
 });
 
+// PUT /appointments/:id/cancel - Cancel appointment
+router.put('/:id/cancel', auth, async (req, res) => {
+    try {
+        const appointment = await Appointment.findOne({
+            _id: req.params.id,
+            userId: req.user.id
+        });
+
+        if (!appointment) {
+            return res.status(404).json({ message: 'Appointment not found' });
+        }
+
+        if (appointment.status !== 'confirmed') {
+            return res.status(400).json({ message: 'Only confirmed appointments can be cancelled' });
+        }
+
+        // Logic: Charge 2/3 as cancellation fee, refund 1/3
+        const totalAmount = appointment.amount;
+        const fee = (totalAmount * 2) / 3;
+        const refund = totalAmount - fee;
+
+        appointment.status = 'cancelled';
+        appointment.cancellationFee = fee;
+        appointment.refundAmount = refund;
+
+        await appointment.save();
+
+        res.json({
+            message: 'Appointment cancelled successfully',
+            appointment,
+            cancellationFee: fee,
+            refundAmount: refund
+        });
+    } catch (err) {
+        console.error('Error cancelling appointment:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// DELETE /appointments/:id - Delete appointment history
+router.delete('/:id', auth, async (req, res) => {
+    try {
+        const appointment = await Appointment.findOneAndDelete({
+            _id: req.params.id,
+            userId: req.user.id
+        });
+
+        if (!appointment) {
+            return res.status(404).json({ message: 'Appointment not found' });
+        }
+
+        res.json({ message: 'Appointment history deleted permanently' });
+    } catch (err) {
+        console.error('Error deleting appointment:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 module.exports = router;

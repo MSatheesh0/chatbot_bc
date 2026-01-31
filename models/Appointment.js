@@ -39,6 +39,14 @@ const appointmentSchema = new mongoose.Schema({
     paymentId: {
         type: String,
         default: 'SIMULATED_PAYMENT'
+    },
+    cancellationFee: {
+        type: Number,
+        default: 0
+    },
+    refundAmount: {
+        type: Number,
+        default: 0
     }
 }, {
     timestamps: true

@@ -74,86 +74,7 @@ router.post('/verify', auth, async (req, res) => {
 
         // Atomic Appointment Creation
         if (status === 'succeeded') {
-            const Appointment = require('../models/Appointment');
-
-            // Check if appointment already exists
-            appointment = await Appointment.findOne({ paymentId: paymentIntentId });
-
-            if (!appointment) {
-                console.log('Creating appointment for successful payment:', paymentIntentId);
-
-                const metadata = paymentIntent.metadata;
-                const amountInRupees = paymentIntent.amount / 100;
-
-                // Generate QR Data
-                const appointmentDate = metadata.appointmentDate || new Date().toISOString();
-
-                const qrDataObj = {
-                    appointmentId: 'PENDING', // Will update after save
-                    doctorName: metadata.doctorName,
-                    hospitalName: metadata.hospitalName,
-                    amount: amountInRupees,
-                    date: appointmentDate,
-                    paymentId: paymentIntentId,
-                    status: 'confirmed'
-                };
-
-                appointment = new Appointment({
-                    userId: req.user.id,
-                    doctorId: metadata.doctorId,
-                    doctorName: metadata.doctorName,
-                    hospitalName: metadata.hospitalName,
-                    amount: amountInRupees,
-                    date: appointmentDate,
-                    paymentId: paymentIntentId,
-                    status: 'confirmed',
-                    qrCodeData: JSON.stringify(qrDataObj)
-                });
-
-                await appointment.save();
-
-                // Update QR data with actual ID
-                qrDataObj.appointmentId = appointment._id;
-                appointment.qrCodeData = JSON.stringify(qrDataObj);
-                await appointment.save();
-
-                console.log('Appointment created:', appointment._id);
-
-                // --- CREATE NOTIFICATIONS ---
-                try {
-                    const Notification = require('../models/Notification');
-                    const apptDate = new Date(appointmentDate);
-
-                    // 24 Hours Before
-                    const time24h = new Date(apptDate.getTime() - 24 * 60 * 60 * 1000);
-                    if (time24h > new Date()) {
-                        await new Notification({
-                            userId: req.user.id,
-                            appointmentId: appointment._id,
-                            doctorName: metadata.doctorName,
-                            reminderType: '24h',
-                            scheduledTime: time24h
-                        }).save();
-                        console.log('Scheduled 24h notification');
-                    }
-
-                    // 2 Hours Before
-                    const time2h = new Date(apptDate.getTime() - 2 * 60 * 60 * 1000);
-                    if (time2h > new Date()) {
-                        await new Notification({
-                            userId: req.user.id,
-                            appointmentId: appointment._id,
-                            doctorName: metadata.doctorName,
-                            reminderType: '2h',
-                            scheduledTime: time2h
-                        }).save();
-                        console.log('Scheduled 2h notification');
-                    }
-                } catch (notifErr) {
-                    console.error('Error creating notifications:', notifErr);
-                    // Don't fail the request if notification creation fails
-                }
-            }
+            appointment = await createAppointment(paymentIntentId, paymentIntent.metadata, paymentIntent.amount, req.user.id);
         }
 
         res.json({ status: status, payment: payment, appointment: appointment });
@@ -162,6 +83,103 @@ router.post('/verify', auth, async (req, res) => {
         res.status(500).json({ message: err.message });
     }
 });
+
+// 2.5 Simulate Success (For Web/Dev Testing)
+router.post('/simulate-success', auth, async (req, res) => {
+    try {
+        const { paymentIntentId } = req.body;
+        console.log('Simulating success for:', paymentIntentId);
+
+        const payment = await Payment.findOne({ paymentIntentId });
+        if (!payment) return res.status(404).json({ message: 'Payment not found' });
+
+        payment.status = 'succeeded';
+        await payment.save();
+
+        const appointment = await createAppointment(paymentIntentId, payment.metadata, payment.amount, req.user.id);
+
+        res.json({ status: 'succeeded', payment, appointment });
+    } catch (err) {
+        console.error('Simulation Error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+async function createAppointment(paymentIntentId, metadata, amountInPaise, userId) {
+    const Appointment = require('../models/Appointment');
+
+    // Check if appointment already exists
+    let appointment = await Appointment.findOne({ paymentId: paymentIntentId });
+
+    if (!appointment) {
+        console.log('Creating appointment for successful payment:', paymentIntentId);
+
+        const amountInRupees = amountInPaise / 100;
+        const appointmentDate = metadata.appointmentDate || new Date().toISOString();
+
+        const qrDataObj = {
+            appointmentId: 'PENDING',
+            doctorName: metadata.doctorName,
+            hospitalName: metadata.hospitalName,
+            amount: amountInRupees,
+            date: appointmentDate,
+            paymentId: paymentIntentId,
+            status: 'confirmed'
+        };
+
+        appointment = new Appointment({
+            userId: userId,
+            doctorId: metadata.doctorId,
+            doctorName: metadata.doctorName,
+            hospitalName: metadata.hospitalName,
+            amount: amountInRupees,
+            date: appointmentDate,
+            paymentId: paymentIntentId,
+            status: 'confirmed',
+            qrCodeData: JSON.stringify(qrDataObj)
+        });
+
+        await appointment.save();
+
+        // Update QR data with actual ID
+        qrDataObj.appointmentId = appointment._id;
+        appointment.qrCodeData = JSON.stringify(qrDataObj);
+        await appointment.save();
+
+        // --- CREATE NOTIFICATIONS ---
+        try {
+            const Notification = require('../models/Notification');
+            const apptDate = new Date(appointmentDate);
+
+            // 24 Hours Before
+            const time24h = new Date(apptDate.getTime() - 24 * 60 * 60 * 1000);
+            if (time24h > new Date()) {
+                await new Notification({
+                    userId: userId,
+                    appointmentId: appointment._id,
+                    doctorName: metadata.doctorName,
+                    reminderType: '24h',
+                    scheduledTime: time24h
+                }).save();
+            }
+
+            // 2 Hours Before
+            const time2h = new Date(apptDate.getTime() - 2 * 60 * 60 * 1000);
+            if (time2h > new Date()) {
+                await new Notification({
+                    userId: userId,
+                    appointmentId: appointment._id,
+                    doctorName: metadata.doctorName,
+                    reminderType: '2h',
+                    scheduledTime: time2h
+                }).save();
+            }
+        } catch (notifErr) {
+            console.error('Error creating notifications:', notifErr);
+        }
+    }
+    return appointment;
+}
 
 // 3. Refund Payment (with cancellation logic)
 router.post('/refund', auth, async (req, res) => {

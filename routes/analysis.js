@@ -184,4 +184,18 @@ router.get('/emotions', auth, async (req, res) => {
     }
 });
 
+// GET /analysis/safety-alerts
+router.get('/safety-alerts', auth, async (req, res) => {
+    try {
+        const SafetyAlert = require('../models/SafetyAlert');
+        const alerts = await SafetyAlert.find({ user: req.user.id })
+            .sort({ timestamp: -1 })
+            .limit(50);
+        res.json(alerts);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
 module.exports = router;

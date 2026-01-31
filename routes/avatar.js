@@ -1,188 +1,259 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-
 const Avatar = require('../models/Avatar');
-const User = require('../models/User');
-const axios = require('axios');
 
-const VOICES = {
-    male: { id: 'TxGEqnHWrfWFTfGW9XjX', name: 'Josh' },
-    female: { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel' }
-};
-
-// POST /avatars (save avatar URL)
-router.post('/', auth, async (req, res) => {
-    try {
-        const { name, url, config } = req.body;
-
-        // Extract Avatar ID from URL
-        // URL format: https://models.readyplayer.me/64b...glb
-        const urlParts = url.split('/');
-        const filename = urlParts[urlParts.length - 1];
-        const avatarId = filename.replace('.glb', '');
-
-        // Fetch Metadata from Ready Player Me API
-        let gender = 'unknown';
-        let bodyType = 'unknown';
-        let confidence = 0;
-
-        try {
-            const metadataRes = await axios.get(`https://api.readyplayer.me/v1/avatars/${avatarId}.json`);
-            const metadata = metadataRes.data;
-
-            if (metadata.outfitGender) {
-                bodyType = metadata.outfitGender; // 'masculine' or 'feminine'
-                if (bodyType === 'masculine') gender = 'male';
-                else if (bodyType === 'feminine') gender = 'female';
-                confidence = 1.0;
-            }
-        } catch (apiErr) {
-            console.error('Failed to fetch RPM metadata:', apiErr.message);
-            // Fallback: could analyze geometry here if needed, or leave as unknown
-        }
-
-        // Deactivate all other avatars for this user
-        await Avatar.updateMany({ user: req.user.id }, { isActive: false });
-
-        const newAvatar = new Avatar({
-            name,
-            url,
-            config,
-            avatarId,
-            gender,
-            bodyType,
-            confidence,
-            user: req.user.id,
-            isActive: true // Set new avatar as active
-        });
-        await newAvatar.save();
-
-        // Sync User Voice Settings if gender is known
-        if (gender !== 'unknown' && VOICES[gender]) {
-            await User.findByIdAndUpdate(req.user.id, {
-                'voiceSettings.gender': gender,
-                'voiceSettings.voiceId': VOICES[gender].id,
-                'voiceSettings.voiceName': VOICES[gender].name
-            });
-        }
-
-        res.status(201).json(newAvatar);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
-
-// GET /avatars/my (list current user's avatars)
-router.get('/my', auth, async (req, res) => {
-    try {
-        const avatars = await Avatar.find({ user: req.user.id });
-        res.json(avatars);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
-
-// GET /avatars/active/:userId (get active avatar for specific user)
-router.get('/active/:userId', auth, async (req, res) => {
-    try {
-        let avatar = await Avatar.findOne({ user: req.params.userId, isActive: true });
-
-        if (!avatar) {
-            // Fallback: Find the most recent avatar
-            const latestAvatar = await Avatar.findOne({ user: req.params.userId }).sort({ createdAt: -1 });
-
-            if (latestAvatar) {
-                latestAvatar.isActive = true;
-                await latestAvatar.save();
-                avatar = latestAvatar;
-            }
-        }
-
-        if (!avatar) return res.status(404).json({ message: 'No active avatar found' });
-        res.json(avatar);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
-
-// GET /avatars/active (get current active avatar for logged in user)
+// @route   GET /avatars/active
+// @desc    Get current user's active avatar
+// @access  Private
 router.get('/active', auth, async (req, res) => {
-    try {
-        let avatar = await Avatar.findOne({ user: req.user.id, isActive: true });
+  try {
+    const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
 
-        if (!avatar) {
-            // Fallback: Find the most recent avatar
-            const latestAvatar = await Avatar.findOne({ user: req.user.id }).sort({ createdAt: -1 });
-
-            if (latestAvatar) {
-                latestAvatar.isActive = true;
-                await latestAvatar.save();
-                avatar = latestAvatar;
-            }
-        }
-
-        if (!avatar) return res.status(404).json({ message: 'No active avatar found' });
-        res.json(avatar);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
+    if (!avatar) {
+      // Return a default or empty if none active
+      return res.status(404).json({ msg: 'No active avatar found' });
     }
+
+    res.json(avatar);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
 });
 
-// GET /avatars/:userId (list user avatars)
-router.get('/:userId', auth, async (req, res) => {
-    try {
-        const avatars = await Avatar.find({ user: req.params.userId });
-        res.json(avatars);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
+// @route   GET /avatars/my
+// @desc    Get all user's avatars with pagination
+// @access  Private
+router.get('/my', auth, async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  try {
+    const avatars = await Avatar.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Avatar.countDocuments({ userId: req.user.id });
+
+    res.json({
+      avatars,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      totalAvatars: total
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
 });
 
-// DELETE /avatars/:avatarId
-router.delete('/:avatarId', auth, async (req, res) => {
-    try {
-        const avatar = await Avatar.findOneAndDelete({
-            _id: req.params.avatarId,
-            user: req.user.id
-        });
-        if (!avatar) return res.status(404).json({ message: 'Avatar not found or unauthorized' });
-        res.json({ message: 'Avatar deleted successfully' });
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
+// @route   POST /avatars
+// @desc    Create a new avatar
+// @access  Private
+router.post('/', auth, async (req, res) => {
+  const { name, url, config } = req.body;
+
+  try {
+    // Set all other avatars as inactive
+    await Avatar.updateMany({ userId: req.user.id }, { isActive: false });
+
+    // Create new avatar as active
+    const avatar = new Avatar({
+      userId: req.user.id,
+      name: name || 'My Avatar',
+      url,
+      config,
+      isActive: true
+    });
+
+    await avatar.save();
+    res.status(201).json(avatar);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
 });
 
-// PUT /avatars/set-active
+// @route   PUT /avatars/set-active
+// @desc    Set an avatar as active
+// @access  Private
 router.put('/set-active', auth, async (req, res) => {
-    try {
-        const { avatarId } = req.body;
+  const { avatarId } = req.body;
 
-        // Deactivate all avatars for this user
-        await Avatar.updateMany({ user: req.user.id }, { isActive: false });
+  try {
+    // Set all user's avatars as inactive
+    await Avatar.updateMany({ userId: req.user.id }, { isActive: false });
 
-        // Set the selected avatar as active
-        const avatar = await Avatar.findOneAndUpdate(
-            { _id: avatarId, user: req.user.id },
-            { isActive: true },
-            { new: true }
-        );
+    // Set the selected one as active
+    const avatar = await Avatar.findOneAndUpdate(
+      { _id: avatarId, userId: req.user.id },
+      { isActive: true },
+      { new: true }
+    );
 
-        if (!avatar) return res.status(404).json({ message: 'Avatar not found or unauthorized' });
-
-        // Sync User Voice Settings if gender is known
-        if (avatar.gender && avatar.gender !== 'unknown' && VOICES[avatar.gender]) {
-            await User.findByIdAndUpdate(req.user.id, {
-                'voiceSettings.gender': avatar.gender,
-                'voiceSettings.voiceId': VOICES[avatar.gender].id,
-                'voiceSettings.voiceName': VOICES[avatar.gender].name
-            });
-        }
-
-        res.json(avatar);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
+    if (!avatar) {
+      return res.status(404).json({ msg: 'Avatar not found' });
     }
+
+    res.json(avatar);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @route   DELETE /avatars/:id
+// @desc    Delete an avatar
+// @access  Private
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const avatar = await Avatar.findOne({ _id: req.params.id, userId: req.user.id });
+
+    if (!avatar) {
+      return res.status(404).json({ msg: 'Avatar not found' });
+    }
+
+    if (avatar.isActive) {
+      return res.status(400).json({ msg: 'Cannot delete active avatar' });
+    }
+
+    await avatar.deleteOne();
+    res.json({ msg: 'Avatar removed' });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @route   POST /avatars/analyze
+// @desc    Analyze user input and return emotion/action
+// @access  Private
+router.post('/analyze', auth, async (req, res) => {
+  const { text, audioData, context } = req.body;
+
+  try {
+    const { analyzeEmotionAndAction } = require('../services/emotionAnalyzer');
+    const { detectLanguage } = require('../services/languageService');
+
+    // Detect language from text or audio
+    const language = await detectLanguage(text || audioData);
+
+    // Analyze emotion and determine action
+    const { emotion, action } = await analyzeEmotionAndAction({
+      text,
+      audioData,
+      context,
+      language
+    });
+
+    // Update active avatar's emotion and action
+    const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
+    if (avatar) {
+      await avatar.logEmotion(emotion, context);
+      avatar.lastAction = action;
+      await avatar.save();
+    }
+
+    res.json({
+      emotion,
+      action,
+      riskLevel: avatar?.riskLevel || 0,
+      language
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @route   POST /avatars/emergency
+// @desc    Handle emergency situation
+// @access  Private
+router.post('/emergency', auth, async (req, res) => {
+  try {
+    const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
+
+    if (!avatar) {
+      return res.status(404).json({ msg: 'Active avatar not found' });
+    }
+
+    const emergencyData = await avatar.handleEmergency();
+    res.json(emergencyData);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @route   GET /avatars/emotion-history
+// @desc    Get emotion history
+// @access  Private
+router.get('/emotion-history', auth, async (req, res) => {
+  try {
+    const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
+
+    if (!avatar) {
+      return res.status(404).json({ msg: 'Active avatar not found' });
+    }
+
+    res.json({
+      emotionHistory: avatar.emotionHistory,
+      riskLevel: avatar.riskLevel
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @route   PUT /avatars/settings
+// @desc    Update avatar settings
+// @access  Private
+router.put('/settings', auth, async (req, res) => {
+  const { settings } = req.body;
+
+  try {
+    const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
+
+    if (!avatar) {
+      return res.status(404).json({ msg: 'Active avatar not found' });
+    }
+
+    avatar.settings = { ...avatar.settings, ...settings };
+    await avatar.save();
+
+    res.json(avatar.settings);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @route   POST /avatars/debug/animation
+// @desc    Set debug animation
+// @access  Private
+router.post('/debug/animation', auth, async (req, res) => {
+  const { animationName } = req.body;
+
+  try {
+    const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
+
+    if (!avatar) {
+      return res.status(404).json({ msg: 'Active avatar not found' });
+    }
+
+    avatar.settings.debugMode = true;
+    avatar.settings.currentAnimation = animationName;
+    await avatar.save();
+
+    res.json({ success: true, currentAnimation: animationName });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
 });
 
 module.exports = router;

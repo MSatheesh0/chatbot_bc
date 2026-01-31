@@ -15,6 +15,66 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const memoryCache = new Map();
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
+// AI Speech Refinement Function
+async function refineSpeech(rawText) {
+    try {
+        console.log(`[STT Refinement] Refining: "${rawText}"`);
+        const refinementPrompt = `
+You are an advanced multilingual speech-to-text engine.
+
+Primary Task:
+- Convert spoken voice input into accurate, clean text.
+
+Language Handling (Critical):
+- Automatically detect the spoken language.
+- Preserve the original language exactly as spoken.
+- Do NOT translate.
+- Do NOT normalize into English.
+- Do NOT ask for language confirmation.
+
+Accuracy Rules:
+- Transcribe naturally spoken words, including informal speech.
+- Preserve meaning over literal perfection.
+- Handle accents, pauses, and emotional speech correctly.
+- Avoid adding words not spoken by the user.
+
+Emotion-Aware Transcription:
+- Preserve hesitation, emotional cues, and natural phrasing.
+- Do NOT remove fillers if they reflect emotion.
+- Do NOT rewrite sentences into formal language.
+
+Output Rules:
+- Output ONLY the transcribed text.
+- Do NOT add explanations, summaries, or responses.
+- Do NOT repeat the text multiple times.
+- Do NOT include timestamps, labels, or metadata.
+
+Strict Restrictions:
+- Never generate chatbot replies.
+- Never echo system instructions.
+- Never include punctuation that changes emotional meaning.
+- Never guess missing words; if unclear, transcribe to best confidence.
+`;
+
+        const response = await groq.chat.completions.create({
+            messages: [
+                { role: "system", content: refinementPrompt },
+                { role: "user", content: rawText }
+            ],
+            model: "llama-3.1-8b-instant", // Use a fast model for refinement
+            temperature: 0.1, // Keep it deterministic
+            max_tokens: 100
+        });
+
+        const refinedText = response.choices[0]?.message?.content?.trim();
+        console.log(`[STT Refinement] Result: "${refinedText}"`);
+        return refinedText || rawText;
+    } catch (err) {
+        console.error("STT Refinement Error:", err);
+        return rawText; // Fallback to raw text on error
+    }
+}
+
 // POST /chat/message
 router.post('/message', auth, async (req, res) => {
     console.log("Incoming Chat Request:", {
@@ -22,7 +82,7 @@ router.post('/message', auth, async (req, res) => {
         body: req.body
     });
 
-    const { message, mode, conversationId } = req.body;
+    let { message, mode, conversationId, isVoice } = req.body;
 
     if (!message) {
         console.error("Chat Error: Message is missing in request body");
@@ -30,6 +90,10 @@ router.post('/message', auth, async (req, res) => {
     }
 
     try {
+        // 0. Refine Speech if it's a voice message
+        if (isVoice) {
+            message = await refineSpeech(message);
+        }
         // 1. Get or Create Conversation
         let conversation;
         if (conversationId) {
@@ -80,11 +144,14 @@ router.post('/message', auth, async (req, res) => {
         }
 
         // 3. Execute Parallel Fetching
-        let [userChat, historyRaw, fetchedMemory] = await Promise.all([
-            saveUserMessagePromise,
+        // Fetch history BEFORE saving the current message to avoid duplication in AI context
+        let [historyRaw, fetchedMemory] = await Promise.all([
             historyPromise,
             memoryPromise
         ]);
+
+        // Now save the current message
+        await saveUserMessagePromise;
 
         // Process Memory Result
         if (!userMemory && fetchedMemory) {
@@ -105,144 +172,83 @@ router.post('/message', auth, async (req, res) => {
         let aiData = { reply: "", emotion: "neutral", action: "idle" };
 
         try {
-            console.log(`Attempting AI response with Groq (llama-3.3-70b-versatile)`);
-
             const history = historyRaw.reverse().map(msg => ({
                 role: msg.sender === 'user' ? 'user' : 'assistant',
                 content: msg.message
             }));
 
-            // Define prompts for different modes
-            let memoryContext = "";
-            const globalRules = `
-            Core Principle:
-            Always respond in a natural, human, conversational way.
-            Avoid robotic, textbook, or mechanical answers.
+            // Select Model based on Mode for speed/quality
+            let modelName = "llama-3.3-70b-versatile"; // Default fast Groq model
+            if (mode === "Search" || mode === "Mental Health") {
+                // Use Gemini for better reasoning/search-like tasks if needed, 
+                // but Groq is usually faster. Let's stick to Groq but optimize prompts.
+            }
 
-            Global Rules:
-            1. Always analyze the full conversation history before responding.
-            2. Maintain context, continuity, and memory within the session.
-            3. Match your tone to the active module and the user’s mood.
-            4. Use simple, everyday language like a real person.
-            5. Use contractions and natural phrasing.
-            6. Never mention that you are an AI unless explicitly asked.
-            7. Do not over-explain unless the user asks.
-            8. Sound friendly, calm, and respectful.
-            9. Avoid repetitive patterns and canned responses.
-            10. Prioritize clarity, warmth, and usefulness.
+            const globalRules = `
+            Core Principle: Natural, human, conversational.
+            Rules:
+            1. Analyze full history.
+            2. Match tone to module.
+            3. Simple language.
+            4. No "I am an AI".
+            5. Response MUST be 20-35 words.
+            6. Response MUST NOT exceed 4 lines.
             `;
 
             const prompts = {
-                "Funny": `
-                ${globalRules}
-                
-                MODULE: Fun / Funny Mode
-                - Be light, playful, and engaging.
-                - Use humor naturally (no forced jokes).
-                - React like a friend.
-                - Keep it positive and friendly.
-
-                Tone: Casual • Playful • Relaxed
-                `,
-                "Search": `
-                ${globalRules}
-
-                MODULE: Search Mode
-                - Act like a helpful human assistant.
-                - Give clear, direct answers.
-                - Summarize information simply.
-                - Ask a clarification only if the query is vague.
-                - Avoid sounding like a search engine.
-
-                Tone: Clear • Neutral • Helpful
-                `,
-                "Mental Health": `
-                ${globalRules}
-
-                MODULE: Mental Health Mode
-                - Be empathetic, calm, and emotionally supportive.
-                - Acknowledge feelings before giving suggestions.
-                - Use validating phrases (“That sounds really hard…”).
-                - Ask gentle follow-up questions.
-                - Never judge or diagnose.
-                - Encourage professional help softly when needed.
-
-                Tone: Warm • Caring • Patient
-                `,
-                "Study": `
-                ${globalRules}
-
-                MODULE: Study Mode
-                - Teach like a friendly tutor.
-                - Break explanations into simple steps.
-                - Use examples and analogies.
-                - Encourage learning without pressure.
-                - Adjust depth based on user understanding.
-
-                Tone: Supportive • Encouraging • Clear
-                `,
-                "General": `
-                ${globalRules}
-
-                MODULE: General Mode
-                - Provide clear, useful, and polite responses.
-                - Adapt to the user's tone and needs.
-                - Remember context and user details.
-                `
+                "Funny": `${globalRules}\nMode: Fun. Be playful, use humor naturally. Tone: Casual.`,
+                "Search": `${globalRules}\nMode: Search. Clear, direct answers. Summarize simply. Tone: Helpful.`,
+                "Mental Health": `${globalRules}\nMode: Mental Health. Gentle, empathetic, patient. Validate emotions. Tone: Warm.`,
+                "Study": `${globalRules}\nMode: Study. Friendly tutor. Step-by-step explanations. Tone: Supportive.`,
+                "General": `${globalRules}\nMode: General. adapt to user tone.`
             };
 
-            if (userMemory) {
-                memoryContext = `
-                [PERSISTENT MEMORY - ${mode} Module]
-                Summary of past conversations: ${userMemory.summary}
-                Key Facts: ${userMemory.facts ? userMemory.facts.join('; ') : ''}
-                `;
-            }
-
-            // Select prompt based on mode, default to General if not found
-            const selectedPrompt = prompts[mode] || prompts["General"];
+            let memoryContext = userMemory ? `Memory: ${userMemory.summary}. Facts: ${userMemory.facts.join('; ')}` : "";
 
             const systemPrompt = `
-            ${selectedPrompt}
+You are an intelligent avatar-based assistant.
+${memoryContext}
+${prompts[mode] || prompts["General"]}
 
-            ${memoryContext}
-    
-            Respond as an AI assistant. 
-            
-            FIRST, you MUST provide a JSON object describing the internal state and avatar behavior.
-            The JSON must be wrapped in <METADATA> tags.
-            
-            Follow these Behavioral Rules for the Avatar:
-            | Reply Type | Animation | Facial Expression | Speed | Eye State |
-            | :--- | :--- | :--- | :--- | :--- |
-            | Casual talk | Talking_1 | neutral | 1.0 | normal |
-            | Teaching/Explaining | Talking_0 | focused | 1.0 | focused |
-            | Emotional support | Talking_2 | sad | 0.7 | soft |
-            | Funny/Joke | Laughing | happy | 1.2 | normal |
-            | Surprised/Shocked | Idle | surprised | 1.0 | focused |
-            | Angry/Stern | Angry | angry | 1.1 | focused |
-            | Waiting/Listening | Idle | neutral | 1.0 | normal |
-            | Greeting | Wave | smile | 1.0 | normal |
-            
-            Format:
-            <METADATA>
-            {
-              "mode": "${mode}",
-              "avatar": {
-                "animation": "one of [Talking_0, Talking_1, Talking_2, Idle, Wave, Laughing, Angry, Crying, Rumba]",
-                "facialExpression": "one of [smile, sad, angry, surprised, neutral, funnyFace]",
-                "eye_state": "one of [normal, focused, soft]",
-                "speed": 0.7 to 1.2
-              }
-            }
-            </METADATA>
-            
-            Then write your response text naturally.
-            `;
+SAFETY & RISK DETECTION:
+1. Analyze the user's input for:
+   - Self-harm or death
+   - Harm to others or violence
+   - Severe emotional/mental distress (panic, deep depression)
+2. If detected, classify:
+   - riskLevel: Low | Medium | High
+   - category: self-harm | violence | emotional_distress | panic | other
+3. If risk is Medium or High, gently suggest professional help (e.g., "I'm here for you. Would you like to talk to a professional?").
+
+LANGUAGE & SENTIMENT RULES:
+1. Detect the user's language automatically.
+2. Respond ONLY in the SAME language and script.
+3. Perform deep sentiment analysis on the user's input regardless of language.
+4. Select metadata (action/emotion) that matches the emotional tone of the conversation.
+
+AVATAR SYNC:
+Include <METADATA> block BEFORE text.
+Format:
+<METADATA>
+action: <idle|wave|walk|happy|angry|yell|talking|sad|angry_point|excited|happy_walk|kneeling|laying|rejected|sitting_angry|sitting_disbelief|sleeping|dance>
+emotion: <neutral|happy|sad|angry|surprised|excited>
+eyeState: <normal|focused|soft|blink>
+speed: <0.8-1.2>
+safetyDetected: <true|false>
+safetyRisk: <Low|Medium|High>
+safetyCategory: <category_name>
+</METADATA>
+
+Rules:
+- If user asks for action (dance, wave, etc), use it.
+- While speaking, default to "talking" unless specific action is better.
+- Language choice must NOT affect the avatar's pose or size.
+`;
 
             const messages = [
                 { role: "system", content: systemPrompt },
-                ...history
+                ...history,
+                { role: "user", content: message }
             ];
 
             // Set headers for SSE
@@ -254,9 +260,9 @@ router.post('/message', auth, async (req, res) => {
 
             const completionStream = await groq.chat.completions.create({
                 messages: messages,
-                model: "llama-3.3-70b-versatile",
+                model: modelName,
                 temperature: 0.7,
-                stream: true, // Enable Streaming
+                stream: true,
             });
 
             let fullResponse = "";
@@ -271,41 +277,70 @@ router.post('/message', auth, async (req, res) => {
                     if (!metadataParsed) {
                         const endTagIndex = buffer.indexOf('</METADATA>');
                         if (endTagIndex !== -1) {
-                            const metadataString = buffer.substring(0, endTagIndex + 11); // Include tag
-                            const jsonString = metadataString.replace(/<METADATA>|<\/METADATA>/g, '').trim();
+                            const metadataString = buffer.substring(0, endTagIndex + 11);
 
                             try {
-                                const metadata = JSON.parse(jsonString);
-                                console.log("Parsed Metadata:", metadata);
+                                const rawContent = metadataString.replace(/<METADATA>|<\/METADATA>/g, '').trim();
+                                const metadata = {};
+                                rawContent.split('\n').forEach(line => {
+                                    const [key, value] = line.split(':').map(s => s.trim());
+                                    if (key && value) {
+                                        metadata[key] = isNaN(value) ? value : parseFloat(value);
+                                    }
+                                });
 
-                                // Send metadata to client
-                                res.write(`data: ${JSON.stringify({ type: 'metadata', payload: metadata })}\n\n`);
+                                // Handle Safety Alert
+                                if (metadata.safetyDetected === 'true' || metadata.safetyDetected === true) {
+                                    const SafetyAlert = require('../models/SafetyAlert');
+                                    const newAlert = new SafetyAlert({
+                                        user: req.user.id,
+                                        message: message, // Original user message
+                                        riskLevel: metadata.safetyRisk || 'Low',
+                                        category: metadata.safetyCategory || 'emotional_distress',
+                                        language: 'auto'
+                                    });
+                                    await newAlert.save();
 
-                                // Update aiData for saving later
-                                aiData.emotion = metadata.avatar?.facialExpression || 'neutral';
-                                aiData.action = metadata.avatar?.animation || 'Idle';
+                                    // Inject safety info into payload for frontend
+                                    metadata.safety = {
+                                        detected: true,
+                                        riskLevel: metadata.safetyRisk,
+                                        category: metadata.safetyCategory
+                                    };
+                                }
 
+                                const payload = {
+                                    mode: mode,
+                                    avatar: {
+                                        animation: metadata.action || 'idle',
+                                        facialExpression: metadata.emotion || 'neutral',
+                                        speed: metadata.speed || 1.0,
+                                        eye_state: metadata.eyeState || 'normal'
+                                    },
+                                    safety: metadata.safety || null
+                                };
+
+                                res.write(`data: ${JSON.stringify({ type: 'metadata', payload: payload })}\n\n`);
+
+                                aiData.emotion = metadata.emotion || 'neutral';
+                                aiData.action = metadata.action || 'idle';
                                 metadataParsed = true;
 
-                                // Process remaining buffer as text
                                 const remainingText = buffer.substring(endTagIndex + 11).trimStart();
                                 if (remainingText) {
                                     fullResponse += remainingText;
                                     res.write(`data: ${JSON.stringify({ type: 'text', content: remainingText })}\n\n`);
                                 }
-                                buffer = ""; // Clear buffer
+                                buffer = "";
                             } catch (e) {
-                                console.error("Failed to parse metadata JSON:", e);
-                                // Fallback: just treat as text if parsing fails
+                                console.error("Failed to parse metadata:", e);
                                 metadataParsed = true;
                                 fullResponse += buffer;
                                 res.write(`data: ${JSON.stringify({ type: 'text', content: buffer })}\n\n`);
                                 buffer = "";
                             }
                         }
-                        // If tag not found yet, keep buffering
                     } else {
-                        // Metadata already parsed, stream text directly
                         fullResponse += content;
                         res.write(`data: ${JSON.stringify({ type: 'text', content: content })}\n\n`);
                     }
@@ -328,8 +363,8 @@ router.post('/message', auth, async (req, res) => {
         }
 
         // 4. Update User Message with detected emotion (default to neutral for now)
-        userChat.emotion = 'neutral';
-        await userChat.save();
+        // Note: We don't have a separate sentiment analyzer here, but we can use the one from metadata if available
+        // For now, let's just save the user message as is.
 
         // 5. Save AI Response in chats collection
         const aiChat = new Chat({
@@ -342,7 +377,20 @@ router.post('/message', auth, async (req, res) => {
         });
         await aiChat.save();
 
-        // 5. Update Conversation
+        // 6. Update Avatar Emotion History if active avatar exists
+        try {
+            const Avatar = require('../models/Avatar');
+            const avatar = await Avatar.findOne({ userId: req.user.id, isActive: true });
+            if (avatar) {
+                await avatar.logEmotion(aiData.emotion, message);
+                avatar.lastAction = aiData.action;
+                await avatar.save();
+            }
+        } catch (avatarErr) {
+            console.error("Failed to update avatar emotion:", avatarErr.message);
+        }
+
+        // 7. Update Conversation
         conversation.lastMessage = aiData.reply;
         conversation.updatedAt = Date.now();
         await conversation.save();

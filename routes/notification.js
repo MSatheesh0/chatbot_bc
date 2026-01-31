@@ -6,19 +6,29 @@ const auth = require('../middleware/auth');
 // GET /notifications
 router.get('/', auth, async (req, res) => {
     try {
-        // Return all notifications, or maybe only those that are 'sent' or 'pending' but past due?
-        // Usually user wants to see upcoming reminders too?
-        // The prompt says "Time notification was sent". This implies we only show sent ones.
-        // But for "In-App Notification Page", usually we show history.
-        // Let's return all for now, frontend can filter or show status.
+        // Return all notifications for the user
         const notifications = await Notification.find({
-            userId: req.user.id,
-            scheduledTime: { $lte: new Date() }
+            userId: req.user.id
         })
             .sort({ scheduledTime: -1 });
         res.json(notifications);
     } catch (err) {
         console.error('Error fetching notifications:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// DELETE /notifications/:id
+router.delete('/:id', auth, async (req, res) => {
+    try {
+        const notification = await Notification.findOneAndDelete({
+            _id: req.params.id,
+            userId: req.user.id
+        });
+        if (!notification) return res.status(404).json({ message: 'Notification not found' });
+        res.json({ message: 'Notification deleted' });
+    } catch (err) {
+        console.error('Error deleting notification:', err);
         res.status(500).json({ message: 'Server error' });
     }
 });
